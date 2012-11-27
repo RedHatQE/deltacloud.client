@@ -41,8 +41,7 @@
 (defn instances "get all instances"
   [conn]
   (-> ((conn :get) "instances")
-     :instances
-     :instance))
+     :instances))
 
 (defmacro defstates [m]
   `(do ~@(for [[k v] m]
@@ -65,20 +64,21 @@
    :hwp_memory "256"})
 
 (defn get-actions [conn i]
-  (let [call-method (fn [link]
-                      (let [method (-> link :method keyword conn)]
-                        (method nil {:href (:href link)})))
-        method-entry (fn [link]
-                       [(-> link :rel keyword) (partial call-method link)])]
+  (let [call-method (fn [action]
+                      (let [method (-> action :method keyword conn)]
+                        (method nil {:href (:href action)})))
+        method-entry (fn [action]
+                       [(-> action :rel keyword) (partial call-method action)])]
     
-    (->> i :actions :link (map method-entry) (into {}))))
+    (->> i :actions (map method-entry) (into {}))))
 
 (defn action-available-pred [action]
-  #(->> % :actions :link (map :rel) (some #{action})))
+  #(->> % :actions (map :rel) (some #{action})))
 
 (defn ip-address [inst]
-  (-?>> inst :public_addresses :address
-        (some #(re-find #"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}" %))))
+  (-?>> inst :public_addresses
+        (some #(= (:type %) "ipv4"))
+        :address))
 
 (defn refresh "Reloads the instance from deltacloud"
   [conn i]
