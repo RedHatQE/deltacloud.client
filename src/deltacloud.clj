@@ -77,7 +77,8 @@
 
 (defn ip-address [inst]
   (-?>> inst :public_addresses
-        (some #(= (:type %) "ipv4"))
+        (filter #(= (:type %) "ipv4"))
+        first
         :address))
 
 (defn refresh "Reloads the instance from deltacloud"
