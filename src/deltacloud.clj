@@ -4,6 +4,10 @@
             [clojure.string :refer [split]]
             [clojure.core.incubator :refer [-?> -?>>]]))
 
+;;(declare ^:dynamic *kill-instance-when-finished*)
+
+(def ^:dynamic *kill-instance-when-finished* true) 
+
 (defmacro loop-with-timeout
   "Similar to clojure.core/loop, but adds a timeout to break out of
   the loop if it takes too long. timeout is in ms. bindings are the
@@ -168,10 +172,12 @@
   `(let ~instances-binding
      (try
        ~@body
-       (finally (unprovision-all ~(first instances-binding))))))
+       (finally (when *kill-instance-when-finished*
+		  (unprovision-all ~(first instances-binding)))))))
 
 (defmacro with-instance [instance-binding & body]
   `(let ~instance-binding
      (try
        ~@body
-       (finally (unprovision ~(first instance-binding))))))
+       (finally (when *kill-instance-when-finished*
+		  (unprovision ~(first instance-binding)))))))
