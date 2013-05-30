@@ -2,7 +2,8 @@
   (:require [clj-http.client :as http]
             [clojure.data.json :as json]
             [clojure.string :refer [split]]
-            [clojure.core.incubator :refer [-?> -?>>]]))
+            [clojure.core.incubator :refer [-?> -?>>]]
+            [slingshot.slingshot :refer [try+ throw+]]))
 
 (defmacro loop-with-timeout
   "Similar to clojure.core/loop, but adds a timeout to break out of
@@ -94,8 +95,9 @@
       i
       (do
         #_(prn (select-keys i [:name :state :public_addresses :actions]))
-        (Thread/sleep 10000)
-        (recur (refresh conn i))))))
+        (Thread/sleep 30000)
+        (recur (refresh conn i))))
+    (throw+ {:type ::timeout-error, ::instance i})))
 
 (defn perform-action-wait
   "Performs action on instance i, waits for pred to become true."
@@ -118,11 +120,28 @@
             (-> ((conn :post) "instances" {:query-params m}) :instance)
             (action-available-pred "start")))
 
-(defn start [conn i]
-  (perform-action-wait conn i :start (every-pred running? ip-address)))
-
 (defn stop [conn i]
   (perform-action-wait conn i :stop stopped?))
+
+(defn unprovision "Whatever state the instance is in, destroy it"
+  ([i] (unprovision (:deltacloud-connection i) i))
+  ([conn i]
+     {:pre [conn]}
+     (try+
+      (cond (stopped? i) (destroy conn i)
+            (running? i) (destroy conn (stop conn i))
+            :else (unprovision (wait-for conn i
+                                         (some-fn stopped? running?))))
+      (catch Exception e (throw+ {:type ::unprovision-failed
+                                  :instance i
+                                  :cause e})))))
+
+(defn start [conn i]
+  (try+
+   (perform-action-wait conn i :start (every-pred running? ip-address))
+   (catch [:type ::timeout-error] e
+     (unprovision conn (::instance e))
+     (throw+ e))))
 
 (defn destroy [conn i]
   (perform-action-wait conn i :destroy nil?))
@@ -133,14 +152,7 @@
   (assoc (start conn (create-instance conn m))
     :deltacloud-connection conn))
 
-(defn unprovision "Whatever state the instance is in, destroy it"
-  ([i] (unprovision (:deltacloud-connection i) i))
-  ([conn i]
-     {:pre [conn]}
-     (cond (stopped? i) (destroy conn i)
-           (running? i) (destroy conn (stop conn i))
-           :else (unprovision (wait-for conn i
-                                        (some-fn stopped? running?))))))
+
 
 (defn provision-all
   "Provision instances with given properties (a list of maps), in
@@ -159,9 +171,15 @@
   "Destroy all the given instances, in parallel."
   ([instances] (unprovision-all (:deltacloud-connection instances) (:instances instances)))
   ([conn instances]
-     (map deref
-          (doall (for [i instances]
-                   (future (unprovision conn i)))))))
+     (for [f (doall (for [i instances]
+                      (future (unprovision conn i))))]
+       (let [r (try+ (deref f)
+                     (catch [:type ::unprovision-failed] e e))
+             grouped (group-by :type r)]
+         (if (seq (:type grouped))
+           (throw+ {:type ::some-unprovisisons-failed
+                    :results grouped})
+           r)))))
 
 (defmacro with-instances "Executes body with bound instances."
   [instances-binding & body]
