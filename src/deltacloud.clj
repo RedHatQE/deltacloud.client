@@ -127,6 +127,9 @@
 (defn stop [conn i]
   (perform-action-wait conn i :stop stopped?))
 
+(defn destroy [conn i]
+  (perform-action-wait conn i :destroy nil?))
+
 (defn unprovision "Whatever state the instance is in, destroy it"
   ([i] (unprovision (:deltacloud-connection i) i))
   ([conn i]
@@ -146,9 +149,6 @@
    (catch [:type ::timeout-error] e
      (unprovision conn (::instance e))
      (throw+ e))))
-
-(defn destroy [conn i]
-  (perform-action-wait conn i :destroy nil?))
 
 (defn provision
   "Create an instance, start it and wait for it to come up."
