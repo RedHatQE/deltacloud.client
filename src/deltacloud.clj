@@ -9,44 +9,28 @@
 
 (def ^:dynamic *kill-instance-when-finished* true) 
 
-(defmacro loop-with-timeout
-  "Similar to clojure.core/loop, but adds a timeout to break out of
-  the loop if it takes too long. timeout is in ms. bindings are the
-  bindings that would be provided to clojure.core/loop. body is the
-  loop body to execute if the timeout has not been reached. timeout-body
-  is the body to execute if the timeout has been reached. timeout-body
-  defaults to throwing a RuntimeException."
-  [timeout bindings body & [timeout-body]]
-  `(let [starttime# (System/currentTimeMillis)]
-     (loop ~bindings
-       (if  (> (- (System/currentTimeMillis) starttime#) ~timeout)
-         ~(or timeout-body `(throw (RuntimeException. (str "Hit timeout of " ~timeout "ms."))))
-         ~body))))
+(defrecord Instance [name state actions public_addresses connection])
+(defrecord InstanceDefinition [name image_id hwp_memory])
+(defrecord Connection [url user password])
 
-(defn connection
-  "Returns a mapping of http methods to functions. In those functions,
-  you can specify :href in the req, and that will be used as the url
-  and uri will be ignored."
-  [baseurl username password]
-  {:pre [(and baseurl username password)]}
-  (let [connectize (fn [method]
-                     (fn [uri & [req]]
-                       (-?> (method (or (:href req) (format "%s/%s" baseurl uri))
-                                    (dissoc (merge req {:basic-auth [username password]
-                                                        :accept :json
-                                                        :content-type :json})
-                                            :href))
-                            :body
-                            json/read-json)))
-        method-names [`http/get `http/post `http/delete `http/put]
-        keywordify #(-> % str (split #"/") last keyword)]
-    (zipmap (map keywordify method-names)
-            (map (comp connectize resolve) method-names))))
+(defn response->instance [r conn]
+  (-> r :instance (assoc :connection conn) map->Instance))
+
+(defn http-method [kw]
+  (->> kw name symbol (ns-resolve 'clj-http.client)))
+
+(defn request [conn http-method uri & [req]]
+  (-?> (http-method (or (:href req) (format "%s/%s" (:url conn) uri))
+                    (dissoc (merge req {:basic-auth [(:user conn) (:password conn)]
+                                        :accept :json
+                                        :content-type :json})
+                            :href))
+       :body
+       json/read-json))
 
 (defn instances "get all instances"
   [conn]
-  (-> ((conn :get) "instances")
-     :instances))
+  (:instances (request conn "instances")))
 
 (defmacro defstates [m]
   `(do ~@(for [[k v] m]
@@ -68,12 +52,13 @@
   {:hwp_cpus "2"
    :hwp_memory "256"})
 
-(defn get-actions [conn i]
-  (let [call-method (fn [action]
-                      (let [method (-> action :method keyword conn)]
-                        (method nil {:href (:href action)})))
-        method-entry (fn [action]
-                       [(-> action :rel keyword) (partial call-method action)])]
+(defn get-actions [i]
+  (let [method-entry (fn [action]
+                       [(-> action :rel keyword),
+                        (partial request (:connection i)
+                                 (-> action :method keyword http-method)
+                                 nil
+                                 {:href (:href action)})])]
     
     (->> i :actions (map method-entry) (into {}))))
 
@@ -87,76 +72,72 @@
         :address))
 
 (defn refresh "Reloads the instance from deltacloud"
-  [conn i]
-  (:instance ((conn :get) (format "instances/%s" (:id i)))))
+  [i]
+  (let [conn (:connection i)]
+    (-> conn
+        (request http/get (format "instances/%s" (:id i))),
+        (response->instance conn))))
 
 (defn wait-for
   "Wait for pred to become true on instance i (refreshing
   periodically)"
-  [conn i pred]
-  (loop-with-timeout 600000 [i i]
+  [i pred]
+  (loop [i i]
     (if (pred i)
       i
       (do
         #_(prn (select-keys i [:name :state :public_addresses :actions]))
         (Thread/sleep 30000)
-        (recur (refresh conn i))))
-    (throw+ {:type ::timeout-error, ::instance i})))
+        (recur (refresh i))))))
 
 (defn perform-action-wait
   "Performs action on instance i, waits for pred to become true."
-  [conn i action pred]
-  (let [avail-actions (get-actions conn i)]
+  [i action pred]
+  (let [avail-actions (get-actions i)]
     (assert (some #{action} (keys avail-actions))
             (format "%s not one of available actions on instance: %s"
                     action
                     (keys avail-actions)))
-    (wait-for conn
-             (-> action avail-actions .invoke :instance)
-             pred)))
+    (wait-for (-> action avail-actions .invoke (response->instance (:connection i)))
+              pred)))
 
 (defn create-instance
-  "Creates an instance with the given base baseurl, credentials and
-  instance properties. Returns the instance data."
-  [conn m]
-  
-  (wait-for conn
-            (-> ((conn :post) "instances" {:query-params m}) :instance)
-            (action-available-pred "start")))
+  "Creates an instance with the given connection, and
+  instance definition. Returns the instance data as a record."
+  [conn instance-definition]
+  (-> (request conn http/post "instances" {:query-params instance-definition})
+      (response->instance conn)
+      (wait-for (action-available-pred "start"))))
 
-(defn stop [conn i]
-  (perform-action-wait conn i :stop stopped?))
+(defn stop [i]
+  (perform-action-wait i :stop stopped?))
 
-(defn destroy [conn i]
-  (perform-action-wait conn i :destroy nil?))
+(defn destroy [i]
+  (perform-action-wait i :destroy nil?))
 
 (defn unprovision "Whatever state the instance is in, destroy it"
-  ([i] (unprovision (:deltacloud-connection i) i))
-  ([conn i]
-     {:pre [conn]}
+  ([i]
+     {:pre [(:connection i)]}
      (try+
-      (cond (stopped? i) (destroy conn i)
-            (running? i) (destroy conn (stop conn i))
-            :else (unprovision (wait-for conn i
+      (cond (stopped? i) (destroy i)
+            (running? i) (destroy (stop i))
+            :else (unprovision (wait-for i
                                          (some-fn stopped? running?))))
       (catch Exception e (throw+ {:type ::unprovision-failed
                                   :instance i
                                   :cause e})))))
 
-(defn start [conn i]
+(defn start [i]
   (try+
-   (perform-action-wait conn i :start (every-pred running? ip-address))
+   (perform-action-wait i :start (every-pred running? ip-address))
    (catch [:type ::timeout-error] e
-     (unprovision conn (::instance e))
+     (unprovision (::instance e))
      (throw+ e))))
 
 (defn provision
   "Create an instance, start it and wait for it to come up."
-  [conn m]
-  (assoc (start conn (create-instance conn m))
-    :deltacloud-connection conn))
-
-
+  [conn instance-definition]
+  (start (create-instance conn instance-definition)))
 
 (defn provision-all
   "Provision instances with given properties (a list of maps), in
@@ -164,26 +145,22 @@
    deltacloud connection."
   [conn instance-props]
   {:instances (->> (for [inst-prop instance-props]
-                   (future (provision conn inst-prop)))
-                 doall
-                 (map deref))
-   :deltacloud-connection conn})
-
-
+                     (future (provision conn inst-prop)))
+                   doall
+                   (map deref))})
 
 (defn unprovision-all
   "Destroy all the given instances, in parallel."
-  ([instances] (unprovision-all (:deltacloud-connection instances) (:instances instances)))
-  ([conn instances]
-     (for [f (doall (for [i instances]
-                      (future (unprovision conn i))))]
-       (let [r (try+ (deref f)
-                     (catch [:type ::unprovision-failed] e e))
-             grouped (group-by :type r)]
-         (if (seq (:type grouped))
-           (throw+ {:type ::some-unprovisisons-failed
-                    :results grouped})
-           r)))))
+  [instances]
+  (for [f (doall (for [i instances]
+                   (future (unprovision i))))]
+    (let [r (try+ (deref f)
+                  (catch [:type ::unprovision-failed] e e))
+          grouped (group-by :type r)]
+      (if (seq (:type grouped))
+        (throw+ {:type ::some-unprovisisons-failed
+                 :results grouped})
+        r))))
 
 (defmacro with-instances "Executes body with bound instances."
   [instances-binding & body]
@@ -199,3 +176,4 @@
        ~@body
        (finally (when *kill-instance-when-finished*
                   (unprovision ~(first instance-binding)))))))
+
