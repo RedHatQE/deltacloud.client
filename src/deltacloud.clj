@@ -28,9 +28,10 @@
        :body
        json/read-json))
 
-(defn instances "get all instances"
+(defn instances
+  "get all instances"
   [conn]
-  (:instances (request conn "instances")))
+  (:instances (request conn http/get "instances")))
 
 (defmacro defstates [m]
   `(do ~@(for [[k v] m]
