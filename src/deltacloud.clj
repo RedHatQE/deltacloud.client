@@ -13,13 +13,15 @@
 (defrecord InstanceDefinition [name image_id hwp_memory])
 (defrecord Connection [url user password])
 
-(defn response->instance [r conn]
+(defn- response->instance [r conn]
   (-> r :instance (assoc :connection conn) map->Instance))
 
-(defn http-method [kw]
+(defn- http-method
+  "Ex. :get returns 'clj-http.client/get"
+  [kw]
   (->> kw name symbol (ns-resolve 'clj-http.client)))
 
-(defn request [conn http-method uri & [req]]
+(defn- request [conn http-method uri & [req]]
   (-?> (http-method (or (:href req) (format "%s/%s" (:url conn) uri))
                     (dissoc (merge req {:basic-auth [(:user conn) (:password conn)]
                                         :accept :json
@@ -42,10 +44,14 @@
             running? "RUNNING"
             pending? "PENDING"})
 
-(defn by-name [inst-name]
+(defn by-name
+  "A predicate to match an instance name."
+  [inst-name]
   #(= inst-name (:name %)))
 
-(defn instance-by-name [conn inst-name]
+(defn instance-by-name
+  "Return all instances matching inst-name."
+  [conn inst-name]
   (->> conn instances (filter (by-name inst-name)) first))
 
 (def ^{:doc "A set of properties for a small instance."}
@@ -53,14 +59,14 @@
   {:hwp_cpus "2"
    :hwp_memory "256"})
 
-(defn get-actions [i]
+(defn- get-actions [i]
   (let [method-entry (fn [action]
                        [(-> action :rel keyword),
-                        (partial request (:connection i)
+                        (partial request
+                                 (:connection i)
                                  (-> action :method keyword http-method)
                                  nil
                                  {:href (:href action)})])]
-    
     (->> i :actions (map method-entry) (into {}))))
 
 (defn action-available-pred [action]
@@ -110,10 +116,12 @@
       (response->instance conn)
       (wait-for (action-available-pred "start"))))
 
-(defn stop [i]
+(defn stop "Stops an instance."
+  [i]
   (perform-action-wait i :stop stopped?))
 
-(defn destroy [i]
+(defn destroy "Destroys an instance."
+  [i]
   (perform-action-wait i :destroy nil?))
 
 (defn unprovision "Whatever state the instance is in, destroy it"
@@ -128,7 +136,8 @@
                                   :instance i
                                   :cause e})))))
 
-(defn start [i]
+(defn start "Starts an instance."
+  [i]
   (try+
    (perform-action-wait i :start (every-pred running? ip-address))
    (catch [:type ::timeout-error] e
