@@ -7,6 +7,8 @@
 
 ;;(declare ^:dynamic *kill-instance-when-finished*)
 
+(def ^:dynamic *action-timeout* 600000)
+
 (def ^:dynamic *kill-instance-when-finished* true) 
 
 (defrecord Instance [name state actions public_addresses connection])
@@ -90,11 +92,25 @@
      (catch Object o
        (throw+ {:type ::failed-refresh, :cause o, :instance i})))))
 
+(defmacro loop-with-timeout
+  "Similar to clojure.core/loop, but adds a timeout to break out of
+   the loop if it takes too long. timeout is in ms. bindings are the
+   bindings that would be provided to clojure.core/loop. body is the
+   loop body to execute if the timeout has not been reached. timeout-body
+   is the body to execute if the timeout has been reached. timeout-body
+   defaults to throwing a RuntimeException."
+  [timeout bindings body & [timeout-body]]
+  `(let [starttime# (System/currentTimeMillis)]
+     (loop ~bindings
+       (if  (> (- (System/currentTimeMillis) starttime#) ~timeout)
+         ~(or timeout-body `(throw (RuntimeException. (str "Hit timeout of " ~timeout "ms."))))
+         ~body))))
+
 (defn wait-for
   "Wait for pred to become true on instance i (refreshing
   periodically)"
-  [i pred]
-  (loop [i i]
+  [i pred & [timeout]]
+  (loop-with-timeout (or timeout *action-timeout*) [i i]
     (if (pred i)
       i
       (do
@@ -169,7 +185,8 @@
   [instances]
   (for [f (doall (for [i instances]
                    (future (unprovision i))))]
-    (let [r (try+ (deref f)
+    (let [r (try+ (or (deref f *action-timeout* nil)
+                      {:type ::unprovision-timed-out})
                   (catch [:type ::unprovision-failed] e e))
           grouped (group-by :type r)]
       (if (seq (:type grouped))
