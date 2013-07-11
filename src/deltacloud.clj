@@ -14,7 +14,9 @@
 (defrecord Connection [url user password])
 
 (defn- response->instance [r conn]
-  (-> r :instance (assoc :connection conn) map->Instance))
+  (if (:instance r)
+    (-> r :instance (assoc :connection conn) map->Instance)
+    nil))
 
 (defn- http-method
   "Ex. :get returns 'clj-http.client/get"
@@ -81,9 +83,12 @@
 (defn refresh "Reloads the instance from deltacloud"
   [i]
   (let [conn (:connection i)]
-    (-> conn
-        (request http/get (format "instances/%s" (:id i))),
-        (response->instance conn))))
+    (try+
+     (-> conn
+         (request http/get (format "instances/%s" (:id i))),
+         (response->instance conn))
+     (catch Object o
+       (throw+ {:type ::failed-refresh, :cause o, :instance i})))))
 
 (defn wait-for
   "Wait for pred to become true on instance i (refreshing
@@ -94,7 +99,7 @@
       i
       (do
         #_(prn (select-keys i [:name :state :public_addresses :actions]))
-        (Thread/sleep 30000)
+        (Thread/sleep 15000)
         (recur (refresh i))))))
 
 (defn perform-action-wait
@@ -132,9 +137,9 @@
             (running? i) (destroy (stop i))
             :else (unprovision (wait-for i
                                          (some-fn stopped? running?))))
-      (catch Exception e (throw+ {:type ::unprovision-failed
-                                  :instance i
-                                  :cause e})))))
+      (catch Object o (throw+ {:type ::unprovision-failed
+                               :instance i
+                               :cause o})))))
 
 (defn start "Starts an instance."
   [i]
